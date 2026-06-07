@@ -1,0 +1,2 @@
+# MailTheGenie
+AI Email Agent
