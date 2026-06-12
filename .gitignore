@@ -1,5 +1,22 @@
-venv/
-credentials.json
-token.json
+# ── Secrets & Tokens ──────────────────────────────────────────
 .env
+.tokens/
+credentials.json
+
+# ── Python ────────────────────────────────────────────────────
+venv/
 __pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# ── IDE ───────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+
+# ── OS ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
