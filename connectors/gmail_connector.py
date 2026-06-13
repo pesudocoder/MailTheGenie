@@ -35,28 +35,43 @@ def get_gmail_service():
 
 
 def get_recent_emails(service, max_results=10):
-    # Step 1 — get list of message IDs
     result = service.users().messages().list(
         userId="me",
         maxResults=max_results
     ).execute()
 
     messages = result.get("messages", [])
-
-    # Step 2 — fetch subject for each message
     emails = []
+
     for msg in messages:
         msg_data = service.users().messages().get(
             userId="me",
             id=msg["id"],
             format="metadata",
-            metadataHeaders=["Subject", "From"]
+            metadataHeaders=["Subject", "From", "Date"]
         ).execute()
 
-        headers = msg_data["payload"]["headers"]
-        subject = next((h["value"] for h in headers if h["name"] == "Subject"), "(no subject)")
-        sender  = next((h["value"] for h in headers if h["name"] == "From"), "(unknown)")
-        emails.append({"subject": subject, "from": sender})
+        headers   = msg_data["payload"]["headers"]
+        subject   = next((h["value"] for h in headers if h["name"] == "Subject"), "(no subject)")
+        sender    = next((h["value"] for h in headers if h["name"] == "From"), "Unknown")
+        date_str  = next((h["value"] for h in headers if h["name"] == "Date"), "")
+
+        # Parse Gmail date string into datetime
+        from email.utils import parsedate_to_datetime
+        try:
+            received_at = parsedate_to_datetime(date_str)
+        except Exception:
+            from datetime import datetime, timezone
+            received_at = datetime.now(timezone.utc)
+
+        emails.append({
+            "id":          msg["id"],
+            "subject":     subject,
+            "from":        sender,
+            "received_at": received_at,
+            "is_read":     "UNREAD" not in msg_data.get("labelIds", []),
+            "thread_id":   msg_data.get("threadId", "")
+        })
 
     return emails
 
