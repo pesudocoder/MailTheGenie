@@ -1,6 +1,7 @@
 # ── Secrets & Tokens ──────────────────────────────────────────
 .env
 .tokens/
+token.json
 credentials.json
 
 # ── Python ────────────────────────────────────────────────────
