@@ -65,9 +65,10 @@ REASONING STYLE:
 def make_fresh_state():
     """Returns a clean state dict for a new session."""
     return {
-        "pending_draft": None,        # Stores draft info when awaiting confirmation
-        "send_confirmed": False,       # True only after user says "confirm send"
-        "last_email_list": [],         # Last fetched email list (for context)
+        "pending_draft":    None,   # draft preview shown to user
+        "pending_draft_id": None,   # actual Gmail draft ID (internal, never shown)
+        "send_confirmed":   False,  # True only after exact confirmation phrase
+        "last_email_list":  [],
     }
 
 
@@ -90,12 +91,21 @@ def run_agent(user_message: str, messages: list, state: dict) -> str:
         The agent's final response string to show the user.
     """
 
-    # ── MG-14: Detect confirmation intent ─────────────────────────────────────
-    # Before anything else, check if the user is confirming a pending send.
-    # We catch this here so the LLM can't accidentally bypass the guard.
-    confirmation_phrases = ["confirm send", "send it", "yes send", "go ahead and send"]
-    if any(phrase in user_message.lower() for phrase in confirmation_phrases):
-        state["send_confirmed"] = True
+
+   # MG-14 fix: exact set membership, not substring search.
+    # "don't send it" contains "send it" — substring match is unsafe.
+    # Strip + lower + check against a set of exact phrases only.
+    CONFIRM_PHRASES = {
+        "confirm send", "send it", "yes", "yes send",
+        "go ahead", "go ahead and send", "confirm", "do it"
+    }
+    if user_message.strip().lower() in CONFIRM_PHRASES:
+        if state.get("pending_draft_id"):
+            state["send_confirmed"] = True
+        else:
+            # User said "confirm send" but no draft is pending
+            messages.append({"role": "user", "content": user_message})
+            return "No draft is pending. Ask me to draft a reply first."
 
     # Append the user's message to the conversation history.
     # Every LLM call gets the full history — this is how it knows what happened before.
@@ -166,24 +176,51 @@ def run_agent(user_message: str, messages: list, state: dict) -> str:
                 # The LLM can't bypass this — we control execution, not the LLM.
                 if tool_name in ("gmail_send_message", "outlook_send_message"):
                     if not state.get("send_confirmed"):
-                        # Block the send, return a safe refusal as the tool result
+                        # Block — no confirmation yet
                         tool_result = json.dumps({
-                            "status": "blocked",
+                            "status":  "blocked",
                             "message": (
-                                "Send blocked — waiting for user confirmation. "
-                                "The draft is ready. Ask the user to type 'confirm send'."
+                                "Send blocked. Draft is ready for review. "
+                                "Tell the user to type exactly 'confirm send' to send."
                             )
                         })
-                        # Reset confirmation flag for next turn
-                        state["send_confirmed"] = False
                         messages.append({
-                            "role": "tool",
+                            "role":         "tool",
                             "tool_call_id": tool_call.id,
-                            "content": tool_result,
+                            "content":      tool_result,
                         })
-                        continue  # Move to next tool call (if any)
+                        continue
+
+                    # User confirmed — use send_draft() if we have a draft ID
+                    # This sends the exact draft the user reviewed, not a new message
+                    if state.get("pending_draft_id"):
+                        from connectors.gmail_connector import send_draft
+                        from connectors.gmail_connector import get_gmail_service
+                        try:
+                            svc    = get_gmail_service()
+                            result = send_draft(svc, state["pending_draft_id"])
+                            tool_result = json.dumps({
+                                "status":  "sent",
+                                "message": "Email sent successfully."
+                            })
+                        except Exception as e:
+                            tool_result = json.dumps({
+                                "status": "error",
+                                "message": f"Send failed: {e}"
+                            })
+                        finally:
+                            # Reset state regardless of outcome
+                            state["send_confirmed"]   = False
+                            state["pending_draft_id"] = None
+                            state["pending_draft"]    = None
+                        messages.append({
+                            "role":         "tool",
+                            "tool_call_id": tool_call.id,
+                            "content":      tool_result,
+                        })
+                        continue
                     else:
-                        # User confirmed — allow the send, then reset the flag
+                        # No draft ID — let the LLM's tool call proceed normally
                         state["send_confirmed"] = False
 
                 # ── Normal Tool Execution ──────────────────────────────────────
@@ -194,13 +231,26 @@ def run_agent(user_message: str, messages: list, state: dict) -> str:
                 tool_result = execute_tool(tool_name, tool_args)
 
                 # If this was a message fetch, store for potential triage later
+                # If this was a message fetch, store for triage
                 if tool_name in ("gmail_get_messages", "outlook_get_messages"):
                     try:
                         fetched = json.loads(tool_result)
                         if isinstance(fetched, list):
                             state["last_email_list"].extend(fetched)
                     except Exception:
-                        pass  # Non-fatal — triage will just work with what it has
+                        pass
+
+                # If this was a draft creation, store the draft ID internally
+                # The ID comes from gmail_connector.create_draft()'s "_draft_id" key
+                # Never shown to user — used only to call send_draft() on confirmation
+                if tool_name == "gmail_create_draft":
+                    try:
+                        draft_result = json.loads(tool_result)
+                        if draft_result.get("_draft_id"):
+                            state["pending_draft_id"] = draft_result["_draft_id"]
+                            state["pending_draft"]    = draft_result.get("preview", "")
+                    except Exception:
+                        pass
 
                 # Append the tool result to history.
                 # The role must be "tool" and tool_call_id must match the request.
